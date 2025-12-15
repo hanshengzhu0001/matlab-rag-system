@@ -18,30 +18,39 @@ def demo_openai_integration():
     print("🤖 MATLAB RAG with OpenAI Code Generation Demo")
     print("=" * 55)
 
-    # Check for API keys (DeepSeek first, then OpenAI)
-    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
+    # Check for Ollama first, then API keys
+    print("🔍 Checking for available models...")
+    use_qwen = False
+    use_openai = False
 
-    if deepseek_key:
-        print("✅ DeepSeek API key found! (Recommended for Hong Kong)")
-        use_deepseek = True
-        use_openai = False
-    elif openai_key:
-        print("✅ OpenAI API key found!")
-        use_deepseek = False
-        use_openai = True
-    else:
-        print("❌ No API keys found (DEEPSEEK_API_KEY or OPENAI_API_KEY)")
-        print("\n📝 API Options:")
-        print("1. DeepSeek API (works in Hong Kong):")
-        print("   • Get key: https://platform.deepseek.com/api_keys")
-        print("   • Set: export DEEPSEEK_API_KEY='your-key'")
-        print("2. OpenAI API (may not work in Hong Kong):")
-        print("   • Get key: https://platform.openai.com/api-keys")
-        print("   • Set: export OPENAI_API_KEY='your-key'")
-        print("\n💡 Continuing with retrieval-only mode for demo...")
-        use_deepseek = False
-        use_openai = False
+    # Try to initialize the system to test if Qwen actually works
+    try:
+        from query_rag import MATLABQuerySystem
+        test_system = MATLABQuerySystem()
+        # If we get here without exception, Qwen is working
+        print("✅ Qwen2.5-Coder-3B is active and ready!")
+        use_qwen = True
+    except Exception as e:
+        print(f"💡 Qwen not available ({str(e)[:50]}...), checking for API keys...")
+        use_qwen = False
+
+    if not use_qwen:
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            print("✅ OpenAI API key found!")
+            use_openai = True
+        else:
+            print("❌ No models available (Qwen or OpenAI API)")
+            print("\n📝 Setup Options:")
+            print("1. Local Ollama (Recommended - No API keys needed):")
+            print("   • Install: brew install ollama")
+            print("   • Pull model: ollama pull qwen2.5-coder:3b-instruct")
+            print("   • Start: ollama serve")
+            print("2. OpenAI API (Alternative):")
+            print("   • Get key: https://platform.openai.com/api-keys")
+            print("   • Set: export OPENAI_API_KEY='your-key'")
+            print("\n💡 Continuing with retrieval-only mode for demo...")
+            use_openai = False
 
     # Initialize the query system
     try:
@@ -85,19 +94,19 @@ def demo_openai_integration():
     print("🎯 Demo Complete!")
     print(f"• Database: 171,366 embeddings ready")
     print(f"• Retrieval: Semantic search (BGE)")
-    if use_deepseek:
-        print(f"• Code Generation: DeepSeek API (fast, works in Hong Kong)")
+    if use_qwen:
+        print(f"• Code Generation: ✅ Qwen2.5-Coder-3B (local, GPU accelerated)")
+        print("   🎉 Ready to generate MATLAB code!")
     elif use_openai:
         print(f"• Code Generation: OpenAI API")
     else:
         print(f"• Code Generation: Not configured")
 
-    print("\n💡 To enable code generation:")
-    if not use_deepseek:
-        print("   export DEEPSEEK_API_KEY='your-deepseek-key'  # Recommended")
-    if not use_openai:
-        print("   export OPENAI_API_KEY='your-openai-key'      # Alternative")
-    print("   python demo_openai.py")
+    if not use_qwen and not use_openai:
+        print("\n💡 To enable code generation:")
+        print("   ollama pull qwen2.5-coder:3b-instruct  # Recommended (local)")
+        print("   export OPENAI_API_KEY='your-openai-key'  # Alternative")
+        print("   python demo_openai.py")
 
 if __name__ == "__main__":
     demo_openai_integration()

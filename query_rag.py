@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 import logging
 
-# from langchain_ollama import OllamaLLM  # Uncomment when Ollama is available
+# Use LangChain's built-in Ollama wrapper to talk to the local Ollama server
+from langchain.llms import Ollama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -86,32 +87,49 @@ class MATLABQuerySystem:
 
 
     def _create_retriever(self):
-        """Create the retrievers from the loaded database."""
+        """Create the retrievers from the loaded database.
+
+        BM25 is optional: if `rank_bm25` is not installed, we fall back
+        to dense-only retrieval so the system still runs.
+        """
         logger.info("Building retrievers...")
 
-        # Get all documents from the collection for BM25
+        # Dense retriever is always available
         collection = self.vectorstore._collection
         results = collection.get(include=['documents', 'metadatas'])
 
-        # Convert to Document objects for BM25
-        from langchain_core.documents import Document
-        chunks = []
-        for i, doc_content in enumerate(results['documents']):
-            metadata = results['metadatas'][i] if results['metadatas'] else {}
-            chunks.append(Document(page_content=doc_content, metadata=metadata))
-
-        # Dense retriever
         dense_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 5})
 
-        # Sparse retriever (BM25)
-        sparse_retriever = BM25Retriever.from_documents(chunks)
-        sparse_retriever.k = 5
+        # Try to build BM25 retriever; degrade gracefully if deps are missing
+        sparse_retriever = None
+        hybrid = False
 
-        logger.info(f"Retrievers ready with {len(chunks)} chunks")
+        try:
+            from langchain_core.documents import Document
+
+            chunks = []
+            for i, doc_content in enumerate(results["documents"]):
+                metadata = results["metadatas"][i] if results["metadatas"] else {}
+                chunks.append(Document(page_content=doc_content, metadata=metadata))
+
+            from langchain_community.retrievers import BM25Retriever as _BM25Retriever
+
+            sparse_retriever = _BM25Retriever.from_documents(chunks)
+            sparse_retriever.k = 5
+            hybrid = True
+            logger.info(f"Retrievers ready (dense + BM25) with {len(chunks)} chunks")
+        except Exception as e:
+            logger.warning(
+                "BM25 retriever unavailable (%s). "
+                "Install it with `pip install rank_bm25` to enable hybrid retrieval.",
+                e,
+            )
+            logger.info("Falling back to dense-only retrieval.")
+
         return {
             "dense": dense_retriever,
             "sparse": sparse_retriever,
-            "hybrid": True
+            "hybrid": hybrid,
         }
 
 
@@ -119,34 +137,27 @@ class MATLABQuerySystem:
         """Create the RAG chain with OpenAI/CodeLlama for generation."""
         logger.info("Initializing code generation model...")
 
-        # Try DeepSeek API first (works in Hong Kong)
-        deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-        if deepseek_api_key:
-            try:
-                from openai import OpenAI as DeepSeekClient
-                llm = ChatOpenAI(
-                    model="deepseek-chat",  # Fast model for code generation
-                    temperature=0.1,        # Low temperature for deterministic code
-                    max_tokens=1000,        # Reasonable limit for code responses
-                    api_key=deepseek_api_key,
-                    base_url="https://api.deepseek.com"
-                )
+        # Try Qwen2.5-Coder-3B via Ollama first (local, no API keys needed)
+        try:
+            llm = Ollama(
+                model="qwen2.5-coder:3b-instruct",  # Must match `ollama list`
+                base_url="http://127.0.0.1:11434",  # Default local endpoint
+                temperature=0.1,                     # Deterministic code
+                num_predict=900,                     # Reasonable cap
+            )
 
-                # Test LLM connection
-                test_response = llm.invoke("Hello, MATLAB!")
-                logger.info("✅ DeepSeek API ready!")
-                use_deepseek = True
-                use_openai = False
-                use_ollama = False
-            except Exception as e:
-                logger.warning(f"⚠️  DeepSeek failed: {e}")
-                use_deepseek = False
-        else:
-            logger.info("💡 No DEEPSEEK_API_KEY found, trying OpenAI...")
-            use_deepseek = False
+            # Test LLM connection
+            test_response = llm.invoke("Hello, MATLAB!")
+            logger.info("✅ Qwen2.5-Coder-3B ready!")
+            use_qwen = True
+            use_openai = False
+        except Exception as e:
+            logger.warning(f"⚠️  Qwen2.5-Coder failed: {e}")
+            logger.info("💡 Make sure to run: ollama pull qwen2.5-coder:3b-instruct")
+            use_qwen = False
 
-        # Try OpenAI API second
-        if not use_deepseek:
+        # Try OpenAI API as fallback
+        if not use_qwen:
             openai_api_key = os.getenv("OPENAI_API_KEY")
             if openai_api_key:
                 try:
@@ -169,37 +180,39 @@ class MATLABQuerySystem:
                 logger.info("💡 No OPENAI_API_KEY found, trying Ollama...")
                 use_openai = False
 
-        # Try Ollama as final fallback
-        if not use_deepseek and not use_openai:
+        # Try OpenAI API as final fallback
+        if not use_qwen and not use_openai:
             try:
-                from langchain_ollama import OllamaLLM
-                llm = OllamaLLM(
-                    model="codellama:7b",   # 7B model for CPU/laptop usage
-                    temperature=0.1,        # Low temperature for deterministic code
-                    num_gpu=0,              # Disable GPU usage
-                    num_ctx=2048,           # Smaller context window for CPU
-                    num_thread=4,           # CPU threads (adjust based on your CPU cores)
-                    timeout=120,            # Timeout for generation
+                llm = ChatOpenAI(
+                    model="gpt-4o-mini",  # Cost-effective model for code generation
+                    temperature=0.1,       # Low temperature for deterministic code
+                    max_tokens=1000,       # Reasonable limit for code responses
+                    api_key=openai_api_key
                 )
 
                 # Test LLM connection
                 test_response = llm.invoke("Hello, MATLAB!")
-                logger.info("✅ CodeLlama model ready!")
-                use_ollama = True
+                logger.info("✅ OpenAI GPT-4o-mini ready!")
+                use_openai = True
             except Exception as e:
-                logger.warning(f"⚠️  Ollama not available: {e}")
+                logger.warning(f"⚠️  OpenAI failed: {e}")
                 logger.warning("📝 Using retrieval-only mode (no code generation)")
                 logger.info("💡 To enable code generation:")
-                logger.info("   Option 1 - OpenAI API:")
+                logger.info("   Option 1 - Ollama Qwen:")
+                logger.info("   ollama pull qwen2.5-coder:3b-instruct")
+                logger.info("   Option 2 - OpenAI API:")
                 logger.info("   export OPENAI_API_KEY='your-key-here'")
-                logger.info("   Option 2 - Ollama:")
-                logger.info("   ollama serve && ollama pull codellama:7b")
                 llm = None
-                use_ollama = False
+                use_openai = False
 
-        if use_deepseek or use_openai or use_ollama:
-            # RAG prompt for API-based LLMs - use retrieved context + code generation
+        if use_qwen or use_openai:
+            # RAG prompt for API-based LLMs - use retrieved context + code generation.
+            # Emphasize that answers must be grounded in syntax-related documentation.
             system_prompt = """You are an expert MATLAB assistant. Use the following MATLAB documentation context to help generate accurate code.
+
+The retrieved context is primarily MATLAB reference pages and examples. When answering,
+you MUST focus on documentation that describes **coding syntax, function signatures,
+arguments, and usage patterns**, not high-level marketing or conceptual text.
 
 CONTEXT (from MATLAB documentation):
 {context}
@@ -207,14 +220,23 @@ CONTEXT (from MATLAB documentation):
 QUESTION: {question}
 
 INSTRUCTIONS:
-1. Generate COMPLETE, runnable MATLAB code (.m file)
-2. Use the provided context to ensure accuracy and proper MATLAB syntax
-3. Include clear comments explaining key steps
-4. If context doesn't contain enough information, supplement with your knowledge but prioritize documentation
-5. Format output as a single code block starting with ```matlab
-6. Focus on syntactically correct, efficient MATLAB code
-7. Include error handling where appropriate
-8. Reference specific MATLAB functions mentioned in the context when relevant
+1. Generate COMPLETE, runnable MATLAB code (.m file).
+2. Base your answer on documentation passages that describe MATLAB SYNTAX or function usage.
+3. If the context does not clearly describe the required syntax, say
+   "I cannot find the precise MATLAB syntax in the provided documentation." rather than guessing.
+4. Treat any MATLAB code appearing in the context as correct unless the context explicitly
+   states it is deprecated or incorrect.
+5. Do NOT invent sections titled "Correct Syntax", "Fix", or similar unless the context
+   itself already contains that wording.
+6. When you state that a line of code is correct or incorrect, first reproduce that exact
+   line from the context and then explain using only what the context says.
+7. Do NOT propose alternative or "safer" syntaxes unless those exact forms also appear in
+   the provided context.
+8. Include clear comments explaining key steps in the code.
+9. Format output as a single code block starting with ```matlab
+10. Focus on syntactically correct, efficient MATLAB code.
+11. Include basic error handling where appropriate.
+12. Explicitly reference the MATLAB functions and syntax forms that appear in the context.
 
 ANSWER:"""
         else:
@@ -236,7 +258,7 @@ ANSWER:"""
 
         prompt = ChatPromptTemplate.from_template(system_prompt)
 
-        if use_deepseek or use_openai or use_ollama:
+        if use_qwen or use_openai:
             # Build the RAG chain using dense retriever (primary)
             chain = (
                 {"context": self.retriever["dense"], "question": RunnablePassthrough()}
@@ -244,12 +266,10 @@ ANSWER:"""
                 | llm
                 | StrOutputParser()
             )
-            if use_deepseek:
-                model_name = "DeepSeek Chat"
-            elif use_openai:
-                model_name = "OpenAI GPT-4o-mini"
+            if use_qwen:
+                model_name = "Qwen2.5-Coder-3B (Ollama)"
             else:
-                model_name = "CodeLlama"
+                model_name = "OpenAI GPT-4o-mini"
             logger.info(f"✅ RAG chain created with {model_name} integration")
         else:
             # Create a simple retrieval-only chain
