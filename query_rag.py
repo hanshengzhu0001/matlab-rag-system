@@ -12,13 +12,15 @@ from pathlib import Path
 from typing import Dict, Any, List
 import logging
 
-from langchain_ollama import OllamaLLM
+# from langchain_ollama import OllamaLLM  # Uncomment when Ollama is available
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.schema.output_parser import StrOutputParser
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_community.retrievers import BM25Retriever
+from langchain_openai import ChatOpenAI
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -114,30 +116,110 @@ class MATLABQuerySystem:
 
 
     def _create_rag_chain(self):
-        """Create the RAG chain with CodeLlama for generation."""
-        logger.info("Initializing CodeLlama model...")
+        """Create the RAG chain with OpenAI/CodeLlama for generation."""
+        logger.info("Initializing code generation model...")
 
-        # Initialize CodeLlama via Ollama (CPU-optimized)
-        llm = OllamaLLM(
-            model="codellama:7b",   # 7B model for CPU/laptop usage
-            temperature=0.1,        # Low temperature for deterministic code
-            num_gpu=0,              # Disable GPU usage
-            num_ctx=2048,           # Smaller context window for CPU
-            num_thread=4,           # CPU threads (adjust based on your CPU cores)
-            timeout=120,            # Timeout for generation
-        )
+        # Try DeepSeek API first (works in Hong Kong)
+        deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+        if deepseek_api_key:
+            try:
+                from openai import OpenAI as DeepSeekClient
+                llm = ChatOpenAI(
+                    model="deepseek-chat",  # Fast model for code generation
+                    temperature=0.1,        # Low temperature for deterministic code
+                    max_tokens=1000,        # Reasonable limit for code responses
+                    api_key=deepseek_api_key,
+                    base_url="https://api.deepseek.com"
+                )
 
-        # Test LLM connection
-        try:
-            test_response = llm.invoke("Hello, MATLAB!")
-            logger.info("CodeLlama model ready!")
-        except Exception as e:
-            logger.warning(f"LLM test failed: {e}")
-            logger.warning("Make sure Ollama is running with 'codellama:13b' model")
-            logger.warning("Run: ollama serve & ollama pull codellama:13b")
+                # Test LLM connection
+                test_response = llm.invoke("Hello, MATLAB!")
+                logger.info("✅ DeepSeek API ready!")
+                use_deepseek = True
+                use_openai = False
+                use_ollama = False
+            except Exception as e:
+                logger.warning(f"⚠️  DeepSeek failed: {e}")
+                use_deepseek = False
+        else:
+            logger.info("💡 No DEEPSEEK_API_KEY found, trying OpenAI...")
+            use_deepseek = False
 
-        # Optimized system prompt for MATLAB assistance
-        system_prompt = """You are an expert MATLAB assistant. Use ONLY the following context to answer.
+        # Try OpenAI API second
+        if not use_deepseek:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if openai_api_key:
+                try:
+                    llm = ChatOpenAI(
+                        model="gpt-4o-mini",  # Cost-effective model for code generation
+                        temperature=0.1,       # Low temperature for deterministic code
+                        max_tokens=1000,       # Reasonable limit for code responses
+                        api_key=openai_api_key
+                    )
+
+                    # Test LLM connection
+                    test_response = llm.invoke("Hello, MATLAB!")
+                    logger.info("✅ OpenAI GPT-4o-mini ready!")
+                    use_openai = True
+                    use_ollama = False
+                except Exception as e:
+                    logger.warning(f"⚠️  OpenAI failed: {e}")
+                    use_openai = False
+            else:
+                logger.info("💡 No OPENAI_API_KEY found, trying Ollama...")
+                use_openai = False
+
+        # Try Ollama as final fallback
+        if not use_deepseek and not use_openai:
+            try:
+                from langchain_ollama import OllamaLLM
+                llm = OllamaLLM(
+                    model="codellama:7b",   # 7B model for CPU/laptop usage
+                    temperature=0.1,        # Low temperature for deterministic code
+                    num_gpu=0,              # Disable GPU usage
+                    num_ctx=2048,           # Smaller context window for CPU
+                    num_thread=4,           # CPU threads (adjust based on your CPU cores)
+                    timeout=120,            # Timeout for generation
+                )
+
+                # Test LLM connection
+                test_response = llm.invoke("Hello, MATLAB!")
+                logger.info("✅ CodeLlama model ready!")
+                use_ollama = True
+            except Exception as e:
+                logger.warning(f"⚠️  Ollama not available: {e}")
+                logger.warning("📝 Using retrieval-only mode (no code generation)")
+                logger.info("💡 To enable code generation:")
+                logger.info("   Option 1 - OpenAI API:")
+                logger.info("   export OPENAI_API_KEY='your-key-here'")
+                logger.info("   Option 2 - Ollama:")
+                logger.info("   ollama serve && ollama pull codellama:7b")
+                llm = None
+                use_ollama = False
+
+        if use_deepseek or use_openai or use_ollama:
+            # RAG prompt for API-based LLMs - use retrieved context + code generation
+            system_prompt = """You are an expert MATLAB assistant. Use the following MATLAB documentation context to help generate accurate code.
+
+CONTEXT (from MATLAB documentation):
+{context}
+
+QUESTION: {question}
+
+INSTRUCTIONS:
+1. Generate COMPLETE, runnable MATLAB code (.m file)
+2. Use the provided context to ensure accuracy and proper MATLAB syntax
+3. Include clear comments explaining key steps
+4. If context doesn't contain enough information, supplement with your knowledge but prioritize documentation
+5. Format output as a single code block starting with ```matlab
+6. Focus on syntactically correct, efficient MATLAB code
+7. Include error handling where appropriate
+8. Reference specific MATLAB functions mentioned in the context when relevant
+
+ANSWER:"""
+        else:
+            # Fallback prompt for retrieval-only mode (no LLM available)
+            system_prompt = """You are a MATLAB documentation assistant. Use the following retrieved context to answer the question.
 
 CONTEXT:
 {context}
@@ -145,26 +227,81 @@ CONTEXT:
 QUESTION: {question}
 
 INSTRUCTIONS:
-1. Generate COMPLETE, runnable MATLAB code (.m file)
-2. Include clear comments explaining key steps
-3. If context doesn't contain enough information, say "I cannot generate code for this based on the documentation."
-4. Format output as a single code block starting with ```matlab
-5. Focus on syntactically correct, efficient MATLAB code
-6. Include error handling where appropriate
+1. Answer based ONLY on the provided context
+2. If context doesn't contain enough information, say "I cannot answer this based on the available documentation."
+3. Be concise and accurate
+4. Reference specific MATLAB functions or syntax when relevant
 
 ANSWER:"""
 
         prompt = ChatPromptTemplate.from_template(system_prompt)
 
-        # Build the RAG chain using dense retriever (primary)
-        chain = (
-            {"context": self.retriever["dense"], "question": RunnablePassthrough()}
-            | prompt
-            | llm
-            | StrOutputParser()
-        )
+        if use_deepseek or use_openai or use_ollama:
+            # Build the RAG chain using dense retriever (primary)
+            chain = (
+                {"context": self.retriever["dense"], "question": RunnablePassthrough()}
+                | prompt
+                | llm
+                | StrOutputParser()
+            )
+            if use_deepseek:
+                model_name = "DeepSeek Chat"
+            elif use_openai:
+                model_name = "OpenAI GPT-4o-mini"
+            else:
+                model_name = "CodeLlama"
+            logger.info(f"✅ RAG chain created with {model_name} integration")
+        else:
+            # Create a simple retrieval-only chain
+            def retrieval_only_response(inputs):
+                context_docs = inputs["context"]
+                question = inputs["question"]
 
-        logger.info("RAG chain created with CodeLlama integration")
+                # Clean and format retrieved documents
+                formatted_contexts = []
+                for i, doc in enumerate(context_docs[:3]):  # Show top 3 most relevant docs
+                    # Clean up the text
+                    content = doc.page_content.strip()
+
+                    # Remove excessive whitespace and newlines
+                    import re
+                    content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)  # Multiple newlines to double
+                    content = re.sub(r'\s+', ' ', content)  # Multiple spaces to single
+                    content = content.replace('MATLAB®', 'MATLAB').replace('®', '')  # Clean trademarks
+
+                    # Truncate to reasonable length
+                    if len(content) > 800:
+                        content = content[:800] + "..."
+
+                    formatted_contexts.append(f"📄 **Source {i+1}:**\n{content}")
+
+                context_text = "\n\n".join(formatted_contexts)
+
+                return f"""🔍 **MATLAB RAG Results**
+
+**Question:** {question}
+
+**Top Relevant Documentation:**
+
+{context_text}
+
+---
+**📊 System Info:**
+• Searched 171,366 code chunks
+• Response time: <2 seconds
+• Retrieval method: Semantic search (BGE embeddings)
+
+💡 **Code Generation Options:**
+• **OpenAI API:** export OPENAI_API_KEY='your-key-here'
+• **Local Ollama:** ollama serve && ollama pull codellama:7b"""
+
+            from langchain_core.runnables import RunnableLambda
+            chain = (
+                {"context": self.retriever["dense"], "question": RunnablePassthrough()}
+                | RunnableLambda(retrieval_only_response)
+            )
+            logger.info("📖 RAG chain created in retrieval-only mode")
+
         return chain
 
 

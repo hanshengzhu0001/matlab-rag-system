@@ -227,30 +227,56 @@ class MATLABRAGBuilder:
             }
         )
 
+        # Check if database already has significant data (resume scenario)
+        existing_docs = 0
+        skip_processing = False
+
+        try:
+            existing_docs = vectorstore._collection.count() if hasattr(vectorstore, '_collection') else 0
+            if existing_docs > len(chunks) * 0.5:  # If we have >50% of expected chunks
+                logger.info(f"Database already contains {existing_docs} embeddings (>50% complete)")
+                logger.info("Will continue processing remaining chunks...")
+                start_chunk = existing_docs  # Resume from where we left off
+            else:
+                start_chunk = 0
+        except (AttributeError, Exception):
+            start_chunk = 0
+
         # Add documents in small batches to avoid memory issues
         start_time = time.time()
         batch_size = 100  # Small batches
 
-        logger.info(f"Adding {len(chunks)} chunks in batches of {batch_size}...")
+        if start_chunk < len(chunks):
+            logger.info(f"Processing chunks {start_chunk} to {len(chunks)} in batches of {batch_size}...")
+            processed_count = start_chunk
 
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            try:
-                vectorstore.add_documents(batch)
-                if (i // batch_size) % 10 == 0:  # Progress every 10 batches
-                    logger.info(f"  Processed {i + len(batch)}/{len(chunks)} chunks...")
-            except Exception as e:
-                logger.warning(f"  Batch {i//batch_size} failed: {e}")
-                continue
+            for i in range(start_chunk, len(chunks), batch_size):
+                batch = chunks[i:i + batch_size]
+                try:
+                    vectorstore.add_documents(batch)
+                    processed_count += len(batch)
+                    if (processed_count // batch_size) % 10 == 0:  # Progress every 10 batches
+                        logger.info(f"  Processed {processed_count}/{len(chunks)} chunks...")
+                except Exception as e:
+                    logger.warning(f"  Batch {(i//batch_size)} failed: {e}")
+                    continue
+        else:
+            logger.info("All chunks already processed!")
 
-        # Persist the database
-        vectorstore.persist()
         creation_time = time.time() - start_time
 
-        logger.info(f"Vector database created successfully:")
-        logger.info(f"  Chunks stored: {len(chunks)}")
+        # Note: ChromaDB automatically persists data, no manual persist() call needed
+
+        # Get final count
+        final_count = vectorstore._collection.count() if hasattr(vectorstore, '_collection') else len(chunks)
+
+        logger.info(f"Vector database updated successfully:")
+        logger.info(f"  Total chunks available: {len(chunks)}")
+        logger.info(f"  Embeddings in database: {final_count}")
+        logger.info(f"  Completion: {final_count/len(chunks)*100:.1f}%")
         logger.info(f"  Persist directory: {self.persist_dir}")
-        logger.info(f"  Creation time: {creation_time:.2f} seconds")
+        if creation_time > 0:
+            logger.info(f"  Processing time: {creation_time:.2f} seconds")
         logger.info(".2f")
 
         return vectorstore

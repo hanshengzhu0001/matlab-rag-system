@@ -12,6 +12,7 @@ matlab_documents/
 # Logs
 *.log
 build_rag.log
+*.json
 
 # Python
 __pycache__/
