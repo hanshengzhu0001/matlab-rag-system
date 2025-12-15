@@ -53,6 +53,20 @@ python test_query.py
 **Response Time**: ~29 seconds  
 **Method**: RAG + DeepSeek API (MATLAB documentation retrieval + code generation)
 
+**Search Process**:
+- **Semantic Search**: BGE-base-en-v1.5 embeddings search through 171,366 documentation chunks
+- **Vector Database**: ChromaDB stores embeddings of MATLAB HTML documentation chunks (600 chars with 100 overlap)
+- **Retrieval**: Top 5 most relevant chunks retrieved based on semantic similarity to query
+
+**Database Contents**: Vector embeddings of parsed MATLAB documentation including:
+- Function reference pages
+- Plotting and graphics documentation
+- Color specification syntax
+- Code examples and best practices
+- Error handling patterns
+
+**Code Generation**: DeepSeek API receives retrieved MATLAB documentation as context, combines it with its knowledge to generate accurate, documentation-compliant code.
+
 ```matlab
 % Create a line graph with custom colors using MATLAB's plot function
 % This script demonstrates multiple ways to specify custom colors
