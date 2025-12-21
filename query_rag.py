@@ -12,8 +12,14 @@ from pathlib import Path
 from typing import Dict, Any, List
 import logging
 
-# Use LangChain's built-in Ollama wrapper to talk to the local Ollama server
-from langchain.llms import Ollama
+# Use LangChain's Ollama wrapper to talk to the local Ollama server
+try:
+    from langchain_ollama import ChatOllama as Ollama
+except ImportError:
+    try:
+        from langchain_community.chat_models import ChatOllama as Ollama
+    except ImportError:
+        from langchain_community.llms import Ollama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -115,7 +121,7 @@ class MATLABQuerySystem:
             from langchain_community.retrievers import BM25Retriever as _BM25Retriever
 
             sparse_retriever = _BM25Retriever.from_documents(chunks)
-            sparse_retriever.k = 5
+        sparse_retriever.k = 5
             hybrid = True
             logger.info(f"Retrievers ready (dense + BM25) with {len(chunks)} chunks")
         except Exception as e:
@@ -211,8 +217,9 @@ class MATLABQuerySystem:
             system_prompt = """You are an expert MATLAB assistant. Use the following MATLAB documentation context to help generate accurate code.
 
 The retrieved context is primarily MATLAB reference pages and examples. When answering,
-you MUST focus on documentation that describes **coding syntax, function signatures,
-arguments, and usage patterns**, not high-level marketing or conceptual text.
+focus on documentation that describes **coding syntax, function signatures, arguments, and usage patterns**.
+For vision-based queries (when users upload images), be more flexible and provide helpful MATLAB code
+examples even if exact documentation matches aren't found, as long as they follow MATLAB best practices.
 
 CONTEXT (from MATLAB documentation):
 {context}
@@ -222,7 +229,9 @@ QUESTION: {question}
 INSTRUCTIONS:
 1. Generate COMPLETE, runnable MATLAB code (.m file).
 2. Base your answer on documentation passages that describe MATLAB SYNTAX or function usage.
-3. If the context does not clearly describe the required syntax, say
+3. For vision-based queries (image analysis): If the context doesn't contain exact syntax matches,
+   provide reasonable MATLAB examples based on common plotting patterns and best practices.
+   For text-only queries: If the context does not clearly describe the required syntax, say
    "I cannot find the precise MATLAB syntax in the provided documentation." rather than guessing.
 4. Treat any MATLAB code appearing in the context as correct unless the context explicitly
    states it is deprecated or incorrect.
@@ -348,7 +357,20 @@ ANSWER:"""
             # Get retrieval context if requested
             context_docs = None
             if show_context:
-                context_docs = self.retriever.get_relevant_documents(question)
+                try:
+                    # Use the dense retriever from our retriever dict
+                    retriever = self.retriever["dense"]
+                    # Try different methods depending on LangChain version
+                    if hasattr(retriever, 'get_relevant_documents'):
+                        context_docs = retriever.get_relevant_documents(question)
+                    elif hasattr(retriever, 'invoke'):
+                        context_docs = retriever.invoke(question)
+                    else:
+                        logger.warning("Retriever doesn't have expected methods, trying __call__")
+                        context_docs = retriever(question)  # Try as callable
+                except Exception as e:
+                    logger.warning(f"Failed to get context documents: {e}")
+                    context_docs = []
 
             result = {
                 "question": question,

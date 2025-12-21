@@ -322,13 +322,97 @@ class MATLABRAGBuilder:
             "hybrid": True  # Flag to indicate hybrid approach
         }
 
+    def add_visual_knowledge_to_db(self, vectorstore, json_path="visual_knowledge.json"):
+        """
+        Add visual knowledge from processed images to the vector database.
 
-    def build_database(self, max_files: int = None):
+        Args:
+            vectorstore: ChromaDB vectorstore to add documents to
+            json_path: Path to the visual knowledge JSON file
+        """
+        import json
+        from pathlib import Path
+
+        json_path = Path(json_path)
+        if not json_path.exists():
+            logger.warning(f"Visual knowledge file not found: {json_path}")
+            logger.info("💡 Generate visual knowledge first by running:")
+            logger.info("   1. matlab -batch extract_ocr")
+            logger.info("   2. python generate_blip_descriptions.py")
+            return
+
+        logger.info(f"🖼️  Loading visual knowledge from {json_path}")
+
+        # Load visual knowledge data
+        with open(json_path, 'r', encoding='utf-8') as f:
+            visual_data = json.load(f)
+
+        logger.info(f"📊 Found {len(visual_data)} visual documents to process")
+
+        # Convert to LangChain Document objects
+        visual_docs = []
+        processed_count = 0
+
+        for item in visual_data:
+            try:
+                # Use combined_text if available, otherwise fall back to OCR or BLIP
+                content = item.get('combined_text', '')
+                if not content:
+                    content = item.get('ocr_text', '') or item.get('blip_caption', '')
+
+                if not content or len(content.strip()) < 10:
+                    continue  # Skip empty or very short content
+
+                # Create document with metadata
+                metadata = {
+                    "source": item['path'],
+                    "type": "image",
+                    "confidence": item.get('confidence', 0),
+                    "has_ocr": bool(item.get('ocr_text', '').strip()),
+                    "has_blip": bool(item.get('blip_caption', '').strip())
+                }
+
+                doc = Document(page_content=content, metadata=metadata)
+                visual_docs.append(doc)
+                processed_count += 1
+
+            except Exception as e:
+                logger.warning(f"Error processing visual item {item.get('path', 'unknown')}: {e}")
+                continue
+
+        if not visual_docs:
+            logger.warning("No valid visual documents found to add")
+            return
+
+        # Add to vectorstore in batches to avoid memory issues
+        batch_size = 100
+        total_added = 0
+
+        logger.info(f"📥 Adding {len(visual_docs)} visual documents to database...")
+
+        for i in range(0, len(visual_docs), batch_size):
+            batch = visual_docs[i:i + batch_size]
+
+            try:
+                vectorstore.add_documents(batch)
+                total_added += len(batch)
+                logger.info(f"   → Added batch {i//batch_size + 1}: {len(batch)} documents")
+
+            except Exception as e:
+                logger.error(f"Error adding batch {i//batch_size + 1}: {e}")
+                continue
+
+        logger.info(f"✅ Added {total_added} visual documents to database")
+        logger.info("🔍 Database now contains both text and visual knowledge!")
+
+
+    def build_database(self, max_files: int = None, include_visual: bool = False):
         """
         Complete pipeline to build the RAG database.
 
         Args:
             max_files: Maximum files to process (for testing)
+            include_visual: Whether to include visual knowledge from images
 
         Returns:
             Configured hybrid retriever
@@ -358,6 +442,11 @@ class MATLABRAGBuilder:
             logger.info("\n🗄️  PHASE 3: Creating Vector Database")
             vectorstore = self.create_vectorstore(chunks)
 
+            # Phase 3.5: Add visual knowledge (optional)
+            if include_visual:
+                logger.info("\n🖼️  PHASE 3.5: Adding Visual Knowledge")
+                self.add_visual_knowledge_to_db(vectorstore)
+
             # Phase 4: Create hybrid retriever
             logger.info("\n🔍 PHASE 4: Building Hybrid Retriever")
             retriever = self.create_hybrid_retriever(vectorstore, chunks)
@@ -369,6 +458,10 @@ class MATLABRAGBuilder:
             logger.info("=" * 60)
             logger.info(f"Total processing time: {total_time:.2f} seconds")
             logger.info(".2f")
+            if include_visual:
+                logger.info("🎨 Visual knowledge: INCLUDED")
+            else:
+                logger.info("📝 Text-only knowledge")
             logger.info(f"Database location: {self.persist_dir}")
             logger.info("Ready for query processing!")
 
