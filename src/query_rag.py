@@ -121,7 +121,7 @@ class MATLABQuerySystem:
             from langchain_community.retrievers import BM25Retriever as _BM25Retriever
 
             sparse_retriever = _BM25Retriever.from_documents(chunks)
-        sparse_retriever.k = 5
+            sparse_retriever.k = 5
             hybrid = True
             logger.info(f"Retrievers ready (dense + BM25) with {len(chunks)} chunks")
         except Exception as e:
@@ -345,7 +345,7 @@ ANSWER:"""
         Returns:
             Dictionary with answer and metadata
         """
-        logger.info(f"Processing query: {question[:100]}...")
+        logger.info(f"Processing query: {question[:150]}...")
 
         start_time = time.time()
 

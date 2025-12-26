@@ -67,20 +67,43 @@ def gradio_interface(image, question):
 
         # Format the response
         analysis_md = "## 🧠 MATLAB Analysis\n\n"
-        analysis_md += f"### 📝 Image Description\n{result['image_description']}\n\n"
-        analysis_md += f"### 🤖 Answer\n{result['final_answer']}\n\n"
+
+        # Add visual analysis summary
+        if 'visual_analysis' in result:
+            visual = result['visual_analysis']
+            analysis_md += f"### 📊 Visual Analysis\n"
+            analysis_md += f"- **Function Family:** {visual.get('function_family', 'unknown')}\n"
+            analysis_md += f"- **Plot Type:** {visual.get('plot_type', 'unknown')}\n"
+            analysis_md += f"- **Characteristics:** {', '.join(visual.get('characteristics', []))}\n\n"
+
+        # Add generated code
+        if 'generated_code' in result and result['generated_code']:
+            analysis_md += f"### 💻 Generated MATLAB Code\n```matlab\n{result['generated_code']}\n```\n\n"
+
+        # Add retrieved examples
+        if 'retrieved_examples' in result and result['retrieved_examples']:
+            analysis_md += f"### 📋 Similar Examples Used\n"
+            for i, example in enumerate(result['retrieved_examples'][:2], 1):
+                analysis_md += f"**Example {i}:**\n```matlab\n{example[:200]}{'...' if len(example) > 200 else ''}\n```\n\n"
+
+        # Add RAG context
+        if 'rag_context' in result and result['rag_context']:
+            analysis_md += f"### 📚 Documentation Context\n{result['rag_context'][:500]}{'...' if len(result['rag_context']) > 500 else ''}\n\n"
 
         # Add sources if available
-        if result.get('source_documents') and len(result['source_documents']) > 0:
+        if result.get('sources') and len(result['sources']) > 0:
             analysis_md += "### 📚 Sources Consulted\n"
-            for i, doc in enumerate(result['source_documents'], 1):
+            for i, doc in enumerate(result['sources'], 1):
                 source_type = "📄" if doc.get('type') == 'text' else "🖼️"
                 analysis_md += f"{i}. {source_type} **{doc.get('source', 'Unknown')}**\n"
                 analysis_md += f"   *{doc.get('content', 'No content available')}*\n\n"
-        else:
-            analysis_md += "### 📚 Note\n*Source documents temporarily unavailable - answer based on full documentation context*\n\n"
 
-        return analysis_md, result['image_description']
+        # Create image description summary
+        image_desc = f"Function: {result.get('visual_analysis', {}).get('function_family', 'unknown')} | "
+        image_desc += f"Type: {result.get('visual_analysis', {}).get('plot_type', 'unknown')} | "
+        image_desc += f"Characteristics: {', '.join(result.get('visual_analysis', {}).get('characteristics', []))}"
+
+        return analysis_md, image_desc
 
     except Exception as e:
         logger.error(f"❌ Interface error: {str(e)}")
@@ -250,15 +273,15 @@ def main():
         demo = create_interface()
 
         print("\n🌐 Launching web interface...")
-        print("📱 Interface will be available at: http://localhost:7860")
+        print("📱 Interface will be available at: http://localhost:7860 (or next available port)")
         print("🔗 Share link will be generated for external access")
         print("\nPress Ctrl+C to stop the server")
         print("=" * 60)
 
-        # Launch with optimal settings
+        # Launch with optimal settings - let Gradio find available port
         demo.launch(
             server_name="0.0.0.0",
-            server_port=7860,
+            server_port=None,  # Let Gradio find available port automatically
             share=True,  # Creates public link
             show_error=True,
             max_threads=4  # Limit threads for stability
